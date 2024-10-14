@@ -6,7 +6,7 @@
 // Define constants
 #define DEFAULT_PORT 54000  // Port number for connecting to the server
 #define DEFAULT_BUFFER_SIZE 1024  // Buffer size for sending/receiving messages
-//This is a test
+// Can you please fix
 // Function prototypes
 bool initializeWinsock();
 SOCKET createClientSocket();

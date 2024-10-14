@@ -5,7 +5,6 @@
 // Define constants
 #define DEFAULT_PORT 54000  // The port number on which the server listens for connections
 #define DEFAULT_BUFFER_SIZE 1024  // Buffer size for sending/receiving messages
-// Another TEst
 // Function prototypes
 bool initializeWinsock();
 SOCKET createListeningSocket();
