@@ -2,6 +2,7 @@
 #include <windows.h> // importing windows function
 #include <conio.h> // console input-output
 #include <fstream> // file input-output stream
+//if this is connected it'll show
 
 using namespace std; // no need to use std::cout, just cout is good
 
