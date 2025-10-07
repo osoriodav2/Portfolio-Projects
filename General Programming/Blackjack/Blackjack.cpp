@@ -9,6 +9,8 @@
 
 using namespace std;
 
+// At some point I should probably fix this to make sure it's actually compliant with the rules.
+
 class Card {
 public:
     static const std::string FACES[14];
