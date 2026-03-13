@@ -1,0 +1,12 @@
+# Core requirements for the Stock Prediction Agent
+flask>=3.0.0              # Web server for the UI
+# Install with:  pip install -r requirements.txt
+
+yfinance>=0.2.36          # Download stock data from Yahoo Finance
+pandas>=2.0.0             # Data manipulation
+numpy>=1.26.0             # Numerical operations
+scikit-learn>=1.4.0       # MinMaxScaler, metrics
+xgboost>=2.0.0            # XGBoost model
+
+# Optional – only needed if you use --model lstm
+# tensorflow>=2.15.0      # LSTM model (large install ~500 MB)
