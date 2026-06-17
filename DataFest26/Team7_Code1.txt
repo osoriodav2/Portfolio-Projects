@@ -1,0 +1,436 @@
+# =============================================================================
+# DATA FEST ANALYSIS - FINAL OPTIMIZED VERSION
+# =============================================================================
+
+# --- Libraries ---
+library(tidyverse)
+library(tidycensus)
+library(lubridate)
+library(broom)
+library(sf)
+library(viridis)
+library(tigris)
+library(biscale)
+
+# Ensure your API key is set
+census_api_key("d4cf2d4671ba8c6c51655d6bdd424255cafac07f", install = TRUE, overwrite = TRUE)
+
+# =============================================================================
+# 1. LOAD DATA
+# =============================================================================
+
+encounters <- read.csv("encounters.csv")
+patients   <- read.csv("patients.csv")
+diagnosis  <- read.csv("diagnosis.csv")
+departments <- read.csv("departments.csv")
+
+# =============================================================================
+# 2. DATA CLEANING & MERGING
+# =============================================================================
+
+# --- 2a. Length of Stay Calculation ---
+encounters <- encounters %>%
+  mutate(
+    admission_clean = make_datetime(AdmitYear, AdmitMonth, AdmitDay, AdmitHour, AdmitMinute),
+    discharge_clean = make_datetime(DischargeYear, DischargeMonth, DischargeDay, DischargeHour, DischargeMinute),
+    los_hours       = as.numeric(difftime(discharge_clean, admission_clean, units = "hours"))
+  ) %>%
+  filter(!is.na(admission_clean), los_hours >= 0)
+
+# --- 2b. Diagnosis Severity Mapping with Justifications ---
+diagnosis <- diagnosis %>%
+  mutate(code = str_remove(GroupCode, "^ICD-10-CM: "))
+
+severity_lookup <- tribble(
+  ~prefix, ~severity, # --- Clinical Justification ---
+  "A0", "Low",      # Intestinal infections; usually self-limiting
+  "A1", "High",     # Tuberculosis; requires isolation & multi-drug regimens
+  "A2", "High",     # Zoonotic bacterial; systemic and serious
+  "A3", "High",     # Other bacterial (e.g. tetanus); significant mortality risk
+  "A4", "Critical", # Sepsis & bacteremia; leading cause of ICU admission
+  "A5", "Moderate", # STIs (e.g. syphilis); systemic if late-stage
+  "A6", "Low",      # Other STIs; largely outpatient-managed
+  "A7", "Moderate", # Other bacterial; often require IV antibiotics
+  "A8", "High",     # Viral CNS infections; high neurological morbidity
+  "A9", "High",     # Arthropod-borne viral; systemic hemorrhagic risk
+  "B0", "Low",      # Viral skin/herpes; typically outpatient
+  "B1", "Moderate", # Viral hepatitis; risk of liver failure
+  "B2", "High",     # HIV disease; immunocompromised, high care complexity
+  "B3", "Low",      # Other viral (e.g. mumps); generally mild
+  "B4", "High",     # Systemic mycoses; invasive fungal infections
+  "B5", "Moderate", # Protozoal (e.g. malaria); requires targeted treatment
+  "B6", "Low",      # Helminth infections; usually treated outpatient
+  "B9", "Moderate", # Sequelae of infectious diseases; residual morbidity
+  "C",  "Critical", # Malignant neoplasms; chemo, surgery, or palliation
+  "D0", "Moderate", # In situ neoplasms; pre-malignant, require monitoring
+  "D1", "Low",      # Benign neoplasms; usually elective removal
+  "D3", "Moderate", # Neoplasms of uncertain behavior; require biopsy
+  "D4", "Moderate", # Neoplasms of unspecified behavior; warrants follow-up
+  "D5", "Moderate", # Anemias; may need transfusions
+  "D6", "High",     # Coagulation defects; bleeding risk, high morbidity
+  "D7", "Moderate", # Other blood disorders; monitored inpatient
+  "D8", "High",     # Immune disorders; complex, high care needs
+  "E0", "Moderate", # Thyroid; managed outpatient unless thyroid storm
+  "E1", "High",     # Diabetes; admissions for DKA or complications
+  "E2", "Moderate", # Other endocrine; complex hormonal management
+  "E4", "High",     # Malnutrition; requires nutritional support/long stay
+  "E5", "Low",      # Vitamin deficiencies; outpatient-managed
+  "E7", "High",     # Metabolic disorders; complex specialist care
+  "E8", "High",     # Electrolyte imbalances; life-threatening acutely
+  "F0", "High",     # Organic mental (dementia/delirium); medical management
+  "F1", "Moderate", # Substance use; detox and withdrawal monitoring
+  "F2", "High",     # Psychotic disorders; inpatient stabilization required
+  "F3", "Moderate", # Mood disorders; severe episodes may require stay
+  "F4", "Low",      # Anxiety/stress; usually outpatient therapy
+  "G0", "Critical", # CNS infections (meningitis); medical emergencies
+  "G1", "High",     # Systemic atrophies; progressive, complex
+  "G3", "High",     # Degenerative CNS (Alzheimer's); high care burden
+  "G4", "Moderate", # Episodic (epilepsy); status epilepticus risk
+  "G7", "High",     # Neuromuscular diseases; respiratory failure risk
+  "G8", "High",     # Cerebral palsy; high dependency
+  "I1", "High",     # Hypertensive diseases; crisis or end-organ damage
+  "I2", "Critical", # Ischemic heart disease (STEMI); ICU/Cath lab
+  "I5", "Critical", # Heart failure & stroke; major driver of long stays
+  "I6", "Critical", # Cerebrovascular; stroke units, high disability
+  "I4", "High",     # Arrhythmias; electrical instability risk
+  "J0", "Low",      # Upper respiratory; self-limiting
+  "J1", "High",     # Influenza and pneumonia; common inpatient driver
+  "J4", "High",     # COPD and asthma; exacerbations require O2/ICU
+  "J8", "Critical", # Respiratory failure and ARDS; ventilator-dependent
+  "K",  "Moderate", # Digestive: Variable (K5/K7 are High)
+  "L",  "Low",      # Skin: Conditions rarely extend LOS significantly
+  "M",  "Moderate", # Musculoskeletal: Fractures can be High
+  "N",  "High",     # Genitourinary: Renal failure is High
+  "O",  "High",     # Pregnancy/Childbirth: Resource-intensive monitoring
+  "P",  "Critical", # Perinatal: NICU conditions, highest vulnerability
+  "Q",  "High",     # Congenital: Surgical correction required
+  "R",  "Low",      # Symptoms/Unspecified: Severity from underlying DX
+  "S",  "High",     # Injuries: Trauma admissions are resource-intensive
+  "T",  "High",     # Poisoning: Overdose often requires ICU
+  "Z",  "Low"       # Administrative/Preventive factors
+)
+
+# Apply Mapping (Two-pass logic for precision)
+lookup_2 <- severity_lookup %>% filter(nchar(prefix) == 2) %>% rename(prefix2 = prefix, sev2 = severity)
+lookup_1 <- severity_lookup %>% filter(nchar(prefix) == 1) %>% rename(prefix1 = prefix, sev1 = severity)
+
+diagnosis_mapped <- diagnosis %>%
+  mutate(prefix2 = substr(code, 1, 2), prefix1 = substr(code, 1, 1)) %>%
+  left_join(lookup_2, by = "prefix2") %>%
+  left_join(lookup_1, by = "prefix1") %>%
+  mutate(severity = coalesce(sev2, sev1, "Other/Unknown"),
+         severity = factor(severity, levels = c("Low", "Moderate", "High", "Critical", "Other/Unknown")))
+
+# --- 2c. Merge Patients and Encounters ---
+patients_clean <- patients %>% 
+  rename(PatientDurableKey = DurableKey) %>%
+  filter(CensusBlockGroupFipsCode != "*Unspecified")
+
+merged <- inner_join(patients_clean, encounters, by = "PatientDurableKey")
+
+# Link severity from Diagnosis table to Encounter via PrimaryDiagnosisKey
+severity_per_encounter <- diagnosis_mapped %>%
+  select(DiagnosisKey, severity) %>%
+  inner_join(merged, by = c("DiagnosisKey" = "PrimaryDiagnosisKey")) %>%
+  group_by(EncounterKey) %>%
+  summarise(dx_severity = severity[1], .groups = "drop")
+
+merged <- left_join(merged, severity_per_encounter, by = "EncounterKey")
+
+# --- 2d. Age Group Creation from PatientBirthYearBin ---
+# PatientBirthYearBin contains decade-style bins (e.g. "1950-1959").
+# We extract the lower bound and map it into 4 clinically meaningful groups:
+#   Pediatric  : born 2007 or later  (approx. 0–17 as of ~2024)
+#   Adult       : born 1985–2006      (approx. 18–39)
+#   Middle-Aged : born 1965–1984      (approx. 40–59)
+#   Senior      : born before 1965    (approx. 60+)
+
+merged <- merged %>%
+  mutate(
+    birth_year_lower = as.integer(str_extract(PatientBirthYearBin, "^\\d{4}")),
+    age_group = case_when(
+      birth_year_lower >= 2007               ~ "Pediatric",
+      birth_year_lower >= 1985               ~ "Adult",
+      birth_year_lower >= 1965               ~ "Middle-Aged",
+      birth_year_lower <  1965               ~ "Senior",
+      TRUE                                   ~ NA_character_
+    ),
+    age_group = factor(age_group, levels = c("Adult", "Pediatric", "Middle-Aged", "Senior"))
+    #                                          ^--- reference level set to Adult
+  )
+
+# --- 2e. Census Data Integration ---
+merged <- merged %>%
+  mutate(GEOID = str_pad(as.character(CensusBlockGroupFipsCode), width = 12, side = "left", pad = "0"))
+
+counties_to_pull <- merged %>%
+  mutate(state = substr(GEOID, 1, 2), county = substr(GEOID, 3, 5)) %>%
+  distinct(state, county) %>% drop_na()
+
+census_vars <- c(med_income = "B19013_001", total_pop = "B27010_001", uninsured = "B27010_017")
+
+census_data <- map2_dfr(counties_to_pull$state, counties_to_pull$county, ~ {
+  get_acs(geography = "block group", variables = census_vars, state = .x, county = .y, year = 2022, output = "wide")
+}) %>%
+  mutate(uninsured_rate = uninsuredE / total_popE) %>%
+  select(GEOID, med_income = med_incomeE, uninsured_rate)
+
+merged <- left_join(merged, census_data, by = "GEOID")
+
+# =============================================================================
+# 3. STATISTICAL MODELING
+# =============================================================================
+
+reg_df <- merged %>%
+  filter(IsHospitalAdmission == 1, !is.na(med_income), !is.na(dx_severity), !is.na(age_group)) %>%
+  mutate(
+    log_los      = log(los_hours + 1),
+    mychart_cat  = relevel(factor(MyChartStatus), ref = "Inactivated"),
+    race         = factor(OmbRace),
+    age_group = relevel(factor(age_group), ref = "Adult"),
+    is_activated = ifelse(MyChartStatus == "Activated", 1, 0)
+  )
+
+# Logistic Model: What predicts MyChart activation?
+activation_model <- glm(
+  is_activated ~ I(med_income / 10000) + uninsured_rate + race + dx_severity + age_group, 
+  data = reg_df, 
+  family = binomial
+)
+
+summary(activation_model)
+
+# Main Regression: Impact on Length of Stay (now includes age_group)
+los_model <- lm(log_los ~ mychart_cat + uninsured_rate + dx_severity + race + age_group, data = reg_df)
+summary(los_model)
+
+# =============================================================================
+# 4. SPATIAL VISUALIZATION (HEATMAPS)
+# =============================================================================
+
+# --- 4a. Prepare block-group level summary data ---
+map_df <- merged %>%
+  filter(!is.na(GEOID)) %>%
+  group_by(GEOID) %>%
+  summarise(
+    mychart_adoption = mean(ifelse(MyChartStatus == "Activated", 1, 0), na.rm = TRUE),
+    uninsured_rate   = first(uninsured_rate),
+    med_income       = first(med_income),
+    pct_senior = mean(age_group == "Senior", na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# --- 4b. Pull Kansas block group geometries ---
+ks_bg <- block_groups(state = "KS", year = 2022, cb = TRUE) %>%
+  select(GEOID, geometry)
+
+# --- 4b2. Pull Kansas state boundary ---
+ks_state <- states(cb = TRUE, year = 2022) %>%
+  filter(STUSPS == "KS")
+
+# --- 4c. Join spatial + data ---
+ks_map_df <- ks_bg %>%
+  left_join(map_df, by = "GEOID") %>%
+  filter(!is.na(mychart_adoption) | !is.na(uninsured_rate) | !is.na(med_income))
+
+# --- 4c2. Pre-compute tidbit stats ---
+avg_adoption   <- mean(ks_map_df$mychart_adoption, na.rm = TRUE)
+avg_uninsured  <- mean(ks_map_df$uninsured_rate,   na.rm = TRUE)
+avg_income     <- median(ks_map_df$med_income,     na.rm = TRUE)
+n_bg           <- nrow(ks_map_df)
+n_patients     <- nrow(merged %>% filter(!is.na(GEOID)))
+
+# --- 4d. Helper theme (sans-serif font) ---
+map_theme <- theme_void(base_family = "sans") +
+  theme(
+    plot.title       = element_text(size = 15, face = "bold",   hjust = 0.5, margin = margin(b = 4),  family = "sans"),
+    plot.subtitle    = element_text(size = 10, hjust = 0.5,     color = "grey35", margin = margin(b = 6), family = "sans"),
+    plot.caption     = element_text(size = 7.5, hjust = 0.5,   color = "grey50", margin = margin(t = 8), family = "sans"),
+    legend.position  = "bottom",
+    legend.title     = element_text(size = 9,  family = "sans"),
+    legend.text      = element_text(size = 8,  family = "sans"),
+    legend.key.width = unit(2.2, "cm"),
+    legend.key.height= unit(0.4, "cm"),
+    plot.background  = element_rect(fill = "white", color = NA),
+    plot.margin      = margin(12, 12, 12, 12)
+  )
+
+# --- 4e. Map 1: MyChart Adoption Rate ---
+p1 <- ggplot(ks_map_df) +
+  geom_sf(aes(fill = mychart_adoption), color = NA) +
+  geom_sf(data = ks_state, fill = NA, color = "black", linewidth = 0.8) +
+  scale_fill_viridis_c(
+    limits = c(.01, 1),
+    option    = "viridis",
+    direction = -1,
+    name      = "Adoption Rate",
+    labels    = scales::percent_format(accuracy = 1),
+    na.value  = "grey85"
+  ) +
+  labs(
+    title    = "MyChart Adoption Rate",
+    subtitle = "By Census Block Group — Kansas",
+    caption  = paste0(
+      "State Avg: ", scales::percent(avg_adoption, accuracy = 0.1),
+      "  |  Block Groups: ", scales::comma(n_bg),
+      "  |  Patients: ", scales::comma(n_patients),
+      "\nSource: Stormont Vail Health & U.S. Census ACS 2022"
+    )
+  ) +
+  map_theme
+
+# --- 4g. Map 3: Median Household Income ---
+p3 <- ggplot(ks_map_df) +
+  geom_sf(aes(fill = med_income), color = NA) +
+  geom_sf(data = ks_state, fill = NA, color = "black", linewidth = 0.8) +
+  scale_fill_viridis_c(
+    limits = c(0,100000),
+    option    = "viridis",
+    name      = "Median Income",
+    direction = -1,
+    labels    = scales::dollar_format(scale = 1e-3, suffix = "K"),
+    na.value  = "grey85"
+  ) +
+  labs(
+    title    = "Median Household Income",
+    subtitle = "By Census Block Group — Kansas",
+    caption  = paste0(
+      "State Median: ", scales::dollar(avg_income, scale = 1e-3, suffix = "K"),
+      "  |  Block Groups: ", scales::comma(n_bg),
+      "  |  Patients: ", scales::comma(n_patients),
+      "\nSource: U.S. Census ACS 2022 (B19013)"
+    )
+  ) +
+  map_theme
+
+# --- 4h. Print all three ---
+print(p1)
+
+print(p3)
+
+# =============================================================================
+# 5. KANSAS BASE MAP WITH COUNTIES
+# =============================================================================
+
+bg_in_data <- merged %>%
+  filter(!is.na(GEOID)) %>%
+  distinct(GEOID) %>%
+  pull(GEOID)
+
+ks_bg <- block_groups(state = "KS", year = 2022, cb = TRUE) %>%
+  st_transform(4326) %>%
+  filter(GEOID %in% bg_in_data)
+
+p_base <- ggplot() +
+  geom_sf(data = ks_bg,    fill = "grey90", color = "grey75", linewidth = 0.1) +
+  geom_sf(data = ks_state, fill = NA,       color = "black",  linewidth = 0.8) +
+  map_theme
+
+print(p_base)
+
+# =============================================================================
+# 6. Presentation Statistics
+# =============================================================================
+
+table(reg_df$dx_severity)
+prop.table(table(reg_df$dx_severity)) * 100
+
+# Age group distribution check
+table(reg_df$age_group)
+prop.table(table(reg_df$age_group)) * 100
+
+summary(reg_df$med_income)
+
+# =============================================================================
+# MyChart status count by age group — grouped bar chart
+# =============================================================================
+reg_df %>%
+  mutate(
+    MyChartStatus = factor(MyChartStatus,
+                           levels = c("Activated")),
+    age_group = fct_relevel(age_group, "Pediatric", "Adult", "Middle-Aged", "Senior")
+  ) %>%
+  count(age_group, MyChartStatus) %>%
+  group_by(age_group) %>%
+  mutate(pct = n / sum(n) * 100) %>%
+  ungroup() %>%
+  ggplot(aes(x = age_group, y = pct, fill = MyChartStatus)) +
+  geom_col(position = position_dodge(width = 0.75), width = 0.65) +
+  geom_text(
+    aes(label = paste0(round(pct, 1), "%")),
+    position = position_dodge(width = 0.75),
+    vjust = -0.5, size = 3, color = "grey30"
+  ) +
+  scale_fill_manual(
+    values = c("Activated" = "#185FA5"),
+    name = NULL
+  ) +
+  scale_y_continuous(
+    labels = scales::percent_format(scale = 1),
+    breaks = seq(0, 100, by = 10),
+    expand = expansion(mult = c(0, 0.02))
+  ) +
+  coord_cartesian(ylim = c(60, 100)) +                                                # <-- missing + was here
+  labs(
+    title   = "MyChart Status by Age Group",
+    x       = NULL,
+    y       = "Percentage Within Age Group",
+    caption = "Source: Stormant Vail Health"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title         = element_text(face = "bold", size = 14),
+    legend.position    = "top",
+    legend.text        = element_text(size = 11),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor   = element_blank(),
+    axis.text.x        = element_text(size = 11)
+  )
+
+
+# =============================================================================
+# MyChart activation statistics by age group
+# =============================================================================
+
+activation_summary <- reg_df %>%
+  mutate(age_group = fct_relevel(age_group, "Pediatric", "Adult", "Middle-Aged", "Senior")) %>%
+  group_by(age_group, MyChartStatus) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  group_by(age_group) %>%
+  mutate(
+    total     = sum(n),
+    pct       = n / total * 100
+  ) %>%
+  ungroup()
+
+print(activation_summary)
+
+# Wide version (easier to read / export)
+activation_wide <- activation_summary %>%
+  select(age_group, MyChartStatus, n, pct) %>%
+  pivot_wider(
+    names_from  = MyChartStatus,
+    values_from = c(n, pct),
+    names_glue  = "{MyChartStatus}_{.value}"
+  ) %>%
+  mutate(across(ends_with("_pct"), ~ round(.x, 1)))
+
+print(activation_wide)
+
+# Overall activation rate per group (Activated only)
+activation_rate <- reg_df %>%
+  mutate(age_group = fct_relevel(age_group, "Pediatric", "Adult", "Middle-Aged", "Senior")) %>%
+  group_by(age_group) %>%
+  summarise(
+    n_total     = n(),
+    n_activated = sum(MyChartStatus == "Activated", na.rm = TRUE),
+    rate        = n_activated / n_total,
+    se          = sqrt(rate * (1 - rate) / n_total),
+    ci_lo       = rate - 1.96 * se,
+    ci_hi       = rate + 1.96 * se,
+    .groups     = "drop"
+  ) %>%
+  mutate(across(c(rate, ci_lo, ci_hi), ~ round(.x * 100, 1)))
+
+print(activation_rate)
+
