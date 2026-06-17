@@ -20,9 +20,9 @@ from data_fetcher import fetch_stock_data, add_technical_indicators
 from predictor import train_xgboost, predict_next_day
 
 SAVE_FILE      = "results/live_portfolio.json"
-BUY_THRESHOLD  =  1.5
-SELL_THRESHOLD = -1.5
-MIN_CONFIDENCE = 55.0
+BUY_THRESHOLD  =  0.5   # lowered from 1.5% — trades more often
+SELL_THRESHOLD = -0.5   # lowered from -1.5%
+MIN_CONFIDENCE = 50.0   # lowered from 55%
 
 
 def _load_state(start_cash: float) -> dict:
@@ -56,6 +56,7 @@ def run_live_session(tickers: list, start_cash: float = 10_000, log_fn=None) -> 
     _log(f"Cash: ${state['cash']:,.2f}  |  Realized P&L so far: ${state.get('realized_pnl', 0):+.2f}")
 
     current_prices = {}   # collect latest price per ticker for mark-to-market
+    session_predictions = {}  # what the model said for each ticker this session
 
     for ticker in tickers:
         _log(f"── {ticker} ──────────────────────")
@@ -79,6 +80,7 @@ def run_live_session(tickers: list, start_cash: float = 10_000, log_fn=None) -> 
 
         pos    = state["positions"].get(ticker, {"shares": 0.0, "avg_cost": 0.0})
         action = "HOLD"
+        reason = ""
 
         # ── BUY ───────────────────────────────────────────────────────────────
         if change_pct > BUY_THRESHOLD and confidence > MIN_CONFIDENCE and state["cash"] >= last_price:
@@ -95,6 +97,7 @@ def run_live_session(tickers: list, start_cash: float = 10_000, log_fn=None) -> 
             pos = {"shares": round(total_sh, 6), "avg_cost": round(new_avg, 4)}
             state["cash"] -= cost
             action = "BUY"
+            reason = f"predicted {change_pct:+.2f}% > +{BUY_THRESHOLD}%, conf {confidence:.0f}% ≥ {MIN_CONFIDENCE}%"
 
             trade = {
                 "date": today, "ticker": ticker, "action": "BUY",
@@ -118,6 +121,7 @@ def run_live_session(tickers: list, start_cash: float = 10_000, log_fn=None) -> 
             state["cash"]         += proceeds
             state["realized_pnl"] = round(state.get("realized_pnl", 0) + realized, 4)
             action = "SELL"
+            reason = f"predicted {change_pct:+.2f}% < {SELL_THRESHOLD}%, conf {confidence:.0f}% ≥ {MIN_CONFIDENCE}%"
 
             trade = {
                 "date": today, "ticker": ticker, "action": "SELL",
@@ -134,7 +138,27 @@ def run_live_session(tickers: list, start_cash: float = 10_000, log_fn=None) -> 
             pos = {"shares": 0.0, "avg_cost": 0.0}
 
         else:
-            _log(f"→ HOLD")
+            # Build a human-readable reason for the HOLD
+            if change_pct <= BUY_THRESHOLD and change_pct >= SELL_THRESHOLD:
+                reason = f"predicted move {change_pct:+.2f}% is within ±{BUY_THRESHOLD}% band"
+            elif confidence < MIN_CONFIDENCE:
+                reason = f"confidence {confidence:.0f}% is below {MIN_CONFIDENCE}% threshold"
+            elif pos["shares"] == 0 and change_pct < SELL_THRESHOLD:
+                reason = f"signal is SELL but no position held"
+            else:
+                reason = f"predicted {change_pct:+.2f}%, conf {confidence:.0f}%"
+            action = "HOLD"
+            _log(f"→ HOLD  ({reason})")
+
+        # Record prediction for UI display
+        session_predictions[ticker] = {
+            "last_price":  round(last_price, 2),
+            "pred_price":  round(pred_price, 2),
+            "change_pct":  round(change_pct, 2),
+            "confidence":  round(confidence, 1),
+            "action":      action,
+            "reason":      reason,
+        }
 
         state["positions"][ticker] = pos
 
@@ -187,6 +211,7 @@ def run_live_session(tickers: list, start_cash: float = 10_000, log_fn=None) -> 
     state["total_pnl"]      = round(total_pnl, 2)
     state["total_pnl_pct"]  = round(total_pnl_pct, 2)
     state["unrealized_pnl"] = round(unrealized, 2)
+    state["last_predictions"] = session_predictions  # what the model said this session
 
     _log(f"✓ Total: ${total:,.2f}  |  Realized: ${realized_pnl:+.2f}  |  Unrealized: ${unrealized:+.2f}")
 

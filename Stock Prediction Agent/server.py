@@ -8,7 +8,7 @@ Serves three modes:
   • Live     – persistent daily paper trading (state saved to disk)
 
 Run:  python server.py
-Open: http://localhost:5000
+Open: http://localhost:5001
 """
 
 import json
@@ -286,5 +286,5 @@ def live_reset():
 
 if __name__ == "__main__":
     os.makedirs("ui", exist_ok=True)
-    print("\n  🚀  Stock Agent UI  →  http://localhost:5000\n")
-    app.run(debug=False, port=5000)
+    print("\n  🚀  Stock Agent UI  →  http://localhost:5001\n")
+    app.run(debug=False, port=5001)

@@ -804,11 +804,37 @@ function renderLivePortfolio(pf) {
   const fmt  = v => '$' + Math.abs(v).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2});
   const fmtS = v => (v>=0?'+':'-') + fmt(v);
 
+  const preds = pf.last_predictions || {};
+  const predCards = Object.entries(preds).map(([t, p]) => {
+    const up = p.change_pct >= 0;
+    const actionColor = p.action === 'BUY' ? 'var(--accent)' : p.action === 'SELL' ? 'var(--red)' : 'var(--amber)';
+    return `<div class="pred-card ${up?'up':'down'}" style="min-width:160px;flex:1">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+        <div class="pred-ticker">${t}</div>
+        <span class="trade-bdg ${p.action}" style="display:inline-block">${p.action}</span>
+      </div>
+      <div class="pred-price-row">
+        <div class="pred-price">$${p.pred_price.toFixed(2)}</div>
+        <div class="pred-chg ${up?'up':'down'}">${up?'▲':'▼'} ${Math.abs(p.change_pct).toFixed(2)}%</div>
+      </div>
+      <div class="pred-sub">Last close: $${p.last_price.toFixed(2)}</div>
+      <div class="conf-lbl"><span>Confidence</span><span>${p.confidence.toFixed(0)}%</span></div>
+      <div class="conf-bar"><div class="conf-fill" style="width:${p.confidence}%"></div></div>
+      <div style="font-size:10px;color:var(--muted);margin-top:6px;line-height:1.4">${p.reason}</div>
+    </div>`;
+  }).join('');
+
   content.innerHTML = `
     <div class="live-header-row">
       <div class="live-badge active">LIVE PORTFOLIO</div>
       <div style="font-size:11px;color:var(--muted);font-family:var(--mono)">${history.length} sessions · ${allTrades.length} trades</div>
     </div>
+
+    ${predCards ? `
+    <div>
+      <div class="sec-label" style="margin-bottom:8px">LATEST SESSION — PREDICTIONS & DECISIONS</div>
+      <div style="display:flex;flex-wrap:wrap;gap:10px">${predCards}</div>
+    </div>` : ''}
 
     <div class="live-pf-grid">
       <div class="live-stat">
